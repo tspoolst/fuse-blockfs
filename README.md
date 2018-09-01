@@ -5,6 +5,7 @@ the primary function is to present a raw block file that can be mounted localy.
 the backing blocks can be stored on any number of cloud filesystems.
 
 the target filesystem is treated as ro.
+
 all writes are stored in the cache directory.
 
 currently syncing blocks requires manual copying of block files from cache to target
