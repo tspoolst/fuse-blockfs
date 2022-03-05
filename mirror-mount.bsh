@@ -1,0 +1,634 @@
+#!/bin/bash
+#[of]:comments
+#[c]dropbox-crypt:  3.3G     0  3.3G   0% /home/tspoolst/mnt/dropbox
+#[c]box-crypt:       10G     0   10G   0% /home/tspoolst/mnt/box
+#[c]jotta-crypt:    5.0G  4.0K  5.0G   1% /home/tspoolst/mnt/jotta
+#[c]mega-crypt:      20G  1.5M   20G   1% /home/tspoolst/mnt/mega
+#[c]
+#[c]
+#[c]need function for killing background processes
+#[c]  otherwise stopping them is very difficult
+#[c]  should add that into the shfnlib
+#[cf]
+#[of]:includes
+#[of]:shfnlib
+#[l]:functions-1.sh:/usr/libexec/shfnlib/functions-1.sh
+. /usr/libexec/shfnlib/functions-1.sh
+#[cf]
+#[of]:objectsh
+#[l]:classdeff.bsh:/usr/lib/objectsh-1/classdeff.bsh
+gl_objectshbase=/usr/lib/objectsh-1
+. ${gl_objectshbase}/classdeff.bsh
+
+#[l]:menu.sclass:/usr/lib/objectsh-1/sclass/menu.sclass
+include menu
+#include /usr/lib/objectsh-1.0/sclass/menu
+#[cf]
+#[cf]
+#[of]:functions
+#[of]:base
+#[of]:function pause {
+function pause {
+  typeset a b lc_timeout lc_message
+  lc_timeout="$1"
+  lc_message="press any key to continue"
+  
+  if ${gl_pause:-true} ; then
+    if [[ -z "${lc_timeout}" ]] ; then
+      read -n 1 -p "${lc_message}" a
+    else
+      echo -n "${lc_message} - ${lc_timeout}"
+      for ((b=${lc_timeout};b>0;b--)) ; do
+        ((b>9)) && echo -ne "\b\b${b}" || echo -ne "\b\b ${b}"
+        read -t 1 -n 1 a && break
+      done
+    fi
+  fi
+}
+#[cf]
+#[of]:function askyn {
+function askyn {
+  typeset lc_askyn_bool
+  while [[ ! "${lc_askyn_bool}" =~ [yn] ]] ; do
+    read -n 1 -s -p "$1? [y/n] " lc_askyn_bool
+    echo "${lc_askyn_bool}"
+  done
+  [[ "${lc_askyn_bool}" == "y" ]] && return 0 || return 1
+}
+#[cf]
+#[cf]
+#[of]:function fn_umountRemotes {
+function fn_umountRemotes {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  typeset i lc_cmount
+  while [[ $# -gt 0 ]] ; do
+    for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+      eval "aset lc_cmount \${gl_${1}mounts${i}[@]}"
+      #echo "attempting to umount ${gl_baseMountDir}/${lc_cmount[1]}"
+      sudo umount ${gl_baseMountDir}/${lc_cmount[1]}
+    done
+    for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+      eval "aset lc_cmount \${gl_${1}mounts${i}[@]}"
+      echo -n "waiting for umount of ${gl_baseMountDir}/${lc_cmount[1]} to complete - "
+      while findmnt -t fuse.rclone -lno TARGET ${gl_baseMountDir}/${lc_cmount[1]} &>/dev/null ; do
+        echo "failed"
+        echo -n "retrying umount of ${gl_baseMountDir}/${lc_cmount[1]} - "
+        sudo umount ${gl_baseMountDir}/${lc_cmount[1]}
+        sleep 1
+      done
+      echo "done"
+    done
+    shift
+  done
+  #killall rclone
+}
+#[cf]
+#[of]:function fn_mountRemotes {
+function fn_mountRemotes {
+  typeset i lc_cmount lc_cache lc_cmsize lc_mounted lc_minutes lc_seconds
+  [[ "$1" == "-nc" ]] && {
+    shift
+    lc_cache=true
+  }
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  while [[ $# -gt 0 ]] ; do
+    lc_cmsize=$(fn getMirrorSize $1)
+    for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+      eval "aset lc_cmount \${gl_${1}mounts${i}[@]:0:2} \$(printf '%.$((${#gl_precision}-1))f' \${gl_${1}mounts${i}[2]})"
+      if findmnt -t fuse.rclone -lno TARGET ${gl_baseMountDir}/${lc_cmount[1]} &>/dev/null ; then
+        lc_mounted[${i}]=true
+        echo "${gl_baseMountDir}/${lc_cmount[1]} already mounted"
+      else
+        #echo "attempting to mount ${gl_baseMountDir}/${lc_cmount[1]}"
+        mkdir -vp ${gl_baseMountDir}/cache/${lc_cmount[1]}
+        if ${lc_cache:-false} ; then
+          rclone mount --daemon --poll-interval 0 --no-modtime --retries 10 ${lc_cmount[0]} ${gl_baseMountDir}/${lc_cmount[1]}/ &
+        else
+          rclone mount \
+            --daemon \
+            --daemon-timeout=10m \
+            --daemon-wait=20m \
+            --retries 10 \
+            --use-mmap \
+            --buffer-size=0M \
+            --transfers=4 \
+            --no-modtime \
+            --dir-cache-time=$((365*24))h \
+            --poll-interval=0 \
+            --vfs-cache-max-age=${gl_maxCacheFileAge}h \
+            --vfs-cache-max-size=$(( (${lc_cmount[2]/./}*1024-gl_remoteDrivePadding*gl_precision)/gl_precision * gl_maxCacheSize*1024*1000/2 * 100*gl_m0Size/lc_cmsize/gl_m0Size/100000 ))M \
+            --vfs-cache-mode=full \
+            --vfs-cache-poll-interval=${gl_maxCacheFileAge}h \
+            --vfs-write-back=10m \
+            ${lc_cmount[0]} ${gl_baseMountDir}/${lc_cmount[1]}/ &
+        fi
+      fi
+    done
+#[c]    shift
+#[c]    echo
+#[c]    continue
+    for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+      if ! ${lc_mounted[${i}]:-false} ; then
+        eval "aset lc_cmount \${gl_${1}mounts${i}[@]}"
+        echo -n "waiting for mount of ${gl_baseMountDir}/${lc_cmount[1]} to complete - "
+        lc_minutes=0 lc_seconds=0
+        while ! findmnt -t fuse.rclone -lno TARGET ${gl_baseMountDir}/${lc_cmount[1]} &>/dev/null ; do
+          ((lc_seconds > 0 || lc_minutes > 0)) && echo -ne "\033[8D"
+          if ! ps axwww | grep -v grep | grep rclone | grep -q ${gl_baseMountDir}/${lc_cmount[1]}/$ ; then
+            die "rclone for ${lc_cmount[1]} died!"
+          fi
+          ((lc_seconds++));((lc_seconds>59)) && { lc_seconds=0;((lc_minutes++)); }
+          printf "%02d:%02d - " ${lc_minutes} ${lc_seconds}
+          sleep 1
+        done
+#[c]        if find remotefs/$1/ -type l -exec readlink {} \; | outarg 0 "//\// " | outarg 4 | sort -u | grep -q "^${lc_cmount[1]}$" ; then
+#[c]        lc_minutes=0 lc_seconds=0
+#[c]          while [[ ! -e ${gl_baseMountDir}/${lc_cmount[1]}/${gl_checkfile} && "$(cat ${gl_baseMountDir}/${lc_cmount[1]}/${gl_checkfile} 2>/dev/null)" != "123elloh321" ]] ; do
+#[c]            ((lc_seconds > 0 || lc_minutes > 0)) && echo -ne "\033[8D"
+#[c]            ((lc_seconds++));((lc_seconds>59)) && { lc_seconds=0;((lc_minutes++)); }
+#[c]            printf "%02d:%02d - " ${lc_minutes} ${lc_seconds}
+#[c]            sleep 1
+#[c]          done
+#[c]        fi
+        echo "done"
+      fi
+    done
+    shift
+  done
+  wait
+}
+#[cf]
+#[of]:function fn_umountBlockfile {
+function fn_umountBlockfile {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  while [[ $# -gt 0 ]] ; do
+    echo "attempting to umount ${gl_baseMountDir}/blockfs/${1}"
+    sudo umount ${gl_baseMountDir}/blockfs/${1}
+    echo -n "waiting for umount of ${gl_baseMountDir}/blockfs/${1} to complete - "
+    while findmnt -lno TARGET ${gl_baseMountDir}/blockfs/${1} &>/dev/null ; do
+      echo "retrying umount of ${gl_baseMountDir}/blockfs/${1} - "
+      sudo umount ${gl_baseMountDir}/blockfs/${1}
+      sleep 1
+    done
+    echo "done"
+    shift
+  done
+}
+#[cf]
+#[of]:function fn_mountBlockfile {
+function fn_mountBlockfile {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  while [[ $# -gt 0 ]] ; do
+    if findmnt -lno TARGET ${gl_baseMountDir}/blockfs/${1} &>/dev/null ; then
+      echo "${gl_baseMountDir}/blockfs/${1} already mounted"
+    else
+      echo "attempting to mount ${gl_baseMountDir}/blockfs/${1}"
+      /home/tspoolst/git/fuse-blockfs-private/blockfs-nocopy \
+        -o allow_root,sync \
+        --blockfile-size=$((gl_${1}Size)) \
+        --chunk-size=${gl_chunksize} --mount-splits=${gl_splitCount} \
+        --local=${gl_baseMountDir}/remotefs/${1}/ \
+        ${gl_baseMountDir}/blockfs/${1}/
+      echo -n "waiting for mount of ${gl_baseMountDir}/blockfs/${1} to complete - "
+      while ! findmnt -lno TARGET ${gl_baseMountDir}/blockfs/${1} &>/dev/null ; do
+        sleep 1
+      done
+      echo "done"
+    fi
+    shift
+  done
+}
+#[cf]
+#[of]:function fn_purgeRemoteCache {
+function fn_purgeRemoteCache {
+  echo "purging rclone cache"
+  rm -vrf ~/.cache/rclone/*
+  return
+  
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  typeset i lc_cmount
+  while [[ $# -gt 0 ]] ; do
+    for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+      eval "aset lc_cmount \${gl_${1}mounts${i}[@]}"
+      echo "purging cache for ${lc_cmount[0]}"
+      rclone --cache-db-purge lsd ${lc_cmount[0]}
+    done
+    shift
+  done
+  wait
+  echo "done"
+}
+#[cf]
+#[of]:function fn_createSplitdirs {
+function fn_createSplitdirs {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  typeset i j lc_splitnum lc_cmount
+  while [[ $# -gt 0 ]] ; do
+    lc_splitnum=1
+    for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+      eval "aset lc_cmount \${gl_${1}mounts${i}[@]:0:2} \$(printf '%.$((${#gl_precision}-1))f' \${gl_${1}mounts${i}[2]})"
+      for ((j=(${lc_cmount[2]/./}*1024-gl_remoteDrivePadding*gl_precision)/gl_precision;j>0;j-=${gl_splitSize})) ; do
+        mkdir -pv ${gl_baseMountDir}/${lc_cmount[1]}/${lc_splitnum} &
+#[c]        { [[ ! -e ${gl_baseMountDir}/${lc_cmount[1]}/${gl_checkfile} ]] && echo "123elloh321" > ${gl_baseMountDir}/${lc_cmount[1]}/${gl_checkfile}; } &
+        ln -sfnTv ${gl_baseMountDir}/${lc_cmount[1]}/${lc_splitnum} ${gl_baseMountDir}/remotefs/${1}/${lc_splitnum}
+        ((lc_splitnum++))
+        ((lc_splitnum > gl_splitCount)) && break
+      done
+      ((lc_splitnum > gl_splitCount)) && break
+    done
+    shift
+  done
+  wait
+}
+#[cf]
+#[of]:function fn_getMirrorSize {
+function fn_getMirrorSize {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  typeset i lc_cmount lc_total
+  for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+    eval "aset lc_cmount \${gl_${1}mounts${i}[@]:0:2} \$(printf '%.$((${#gl_precision}-1))f' \${gl_${1}mounts${i}[2]})"
+    ((lc_total+=(${lc_cmount[2]/./}*1024-gl_remoteDrivePadding*gl_precision) ))
+    #echo $((lc_total/gl_precision))
+  done
+  echo $((lc_total/gl_precision))
+}
+#[c]
+#[c]m0=180 m1=185 18432
+#[c]
+#[c]echo $((1024*4*100)) $(( (1024*4*100/6+5) )) $(( (68271 - 0)*6/100))
+#[c]409600 682.71 4096
+#[c]
+#[c]echo $((1024*4*100)) $(( (1024*4*100/6+5) )) $(( (68271 - 500)*6/100))
+#[c]409600 682.71 4066
+#[c]
+#[c]
+#[c]a=1;b=1;[[ -z "${a##*.*}" ]] && { b=${a##*.};b=$((10**${#b})); };echo $b
+#[cf]
+#[of]:function fn_getRemotes {
+function fn_getRemotes {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  typeset i lc_cremote lc_remoteList
+  while [[ $# -gt 0 ]] ; do
+    for ((i=0;i<gl_${1}totalMounts;i++)) ; do
+      eval "aset lc_cremote \${gl_${1}mounts${i}[@]}"
+      apush lc_remoteList ${lc_cremote[1]}
+    done
+    shift
+  done
+  echo "${lc_remoteList[@]}"
+}
+#[cf]
+#[of]:function fn_createLoopfiles {
+function fn_createLoopfiles {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  while [[ $# -gt 0 ]] ; do
+    echo "attempting create ${gl_baseMountDir}/mirror${1}"
+    ln -sfnv $(losetup -f) ${gl_baseMountDir}/mirror${1} && \
+    ln -sfnv $(losetup -f)p1 ${gl_baseMountDir}/mirror${1}p1 && \
+    sudo losetup -f ${gl_baseMountDir}/blockfs/${1}/block
+    shift
+  done
+}
+#[cf]
+#[of]:function fn_deleteLoopfiles {
+function fn_deleteLoopfiles {
+  [[ -z "$1" ]] && die "missing mirror id.  i.e. \"m0\""
+  typeset lc_loopDevice
+  while [[ $# -gt 0 ]] ; do
+    [[ -e "${gl_baseMountDir}/mirror${1}" ]] && echo "attempting delete ${gl_baseMountDir}/mirror${1} $(readlink ${gl_baseMountDir}/mirror${1})"
+    if losetup -j ${gl_baseMountDir}/blockfs/${1}/block | grep -q . ; then
+      lc_loopDevice=$(losetup -j ${gl_baseMountDir}/blockfs/${1}/block | outarg 1 "%:")
+    elif losetup | grep -Pq ^$(readlink mirror${1})'(?=[[:blank:]]+)' ; then
+      lc_loopDevice=$(readlink mirror${1})
+    elif losetup -j /block | grep -q . ; then
+      lc_loopDevice=$(losetup -j /block | outarg 1 "%:")
+    else
+      lc_loopDevice=""
+    fi
+    if [[ -n "${lc_loopDevice}" ]] ; then
+      sudo losetup -d ${lc_loopDevice} && \
+        rm -vf ${gl_baseMountDir}/mirror${1} ${gl_baseMountDir}/mirror${1}p1
+    fi
+    shift
+  done
+  
+  sudo vgchange -an vg_remote_mirror
+  sudo dmsetup info | grep -Po '^Name:[[:blank:]]+\Kvg_remote.*' | (while read i;do sudo dmsetup remove ${i};done)
+}
+#[cf]
+#[cf]
+#[of]:setup vars
+
+gl_debuglevel=0
+
+aset gl_hotkeys {a..p} {r..z} {A..Z}
+
+gl_baseMountDir="/home/tspoolst/mnt"
+##size of drive chunks in megs
+gl_chunksize=5
+##size of split sections in megs
+gl_splitSize=512
+##amount to leave un-allocated per each remote drive in megs
+gl_remoteDrivePadding=512
+
+gl_precision=1
+
+
+i="m0"
+((gl_${i}totalMounts=0))
+aset gl_${i}mounts$((gl_${i}totalMounts++)) koofr-crypt: koofr 2
+aset gl_${i}mounts$((gl_${i}totalMounts++)) dropbox-crypt: dropbox 3
+aset gl_${i}mounts$((gl_${i}totalMounts++)) pcloud-crypt: pcloud 5
+aset gl_${i}mounts$((gl_${i}totalMounts++)) yandex-crypt: yandex 10
+##api is probably throttled until 12022-02-24
+#[c]#aset gl_${i}mounts$((gl_${i}totalMounts++)) mega-crypt: mega 20
+((gl_${i}Size=$(fn getMirrorSize m0) ))
+
+i="m1"
+((gl_${i}totalMounts=0))
+aset gl_${i}mounts$((gl_${i}totalMounts++)) jotta-crypt: jotta 5
+aset gl_${i}mounts$((gl_${i}totalMounts++)) box-crypt: box 10
+##opendrive has a 1G download limit per 24hs, apparently uploads don't count against the quota
+aset gl_${i}mounts$((gl_${i}totalMounts++)) opendrive-crypt: opendrive 5
+##storj uses bucket and cannot store empty directories - this currently breaks rclone
+#[c]#aset gl_${i}mounts$((gl_${i}totalMounts++)) storj-crypt: storj 150
+((gl_${i}Size=$(fn getMirrorSize m0) ))
+
+gl_remoteList="$(ajoin - , $(fn getRemotes m0 m1))"
+gl_splitCount=$((gl_m0Size/gl_splitSize))
+
+gl_checkfile=a.chk
+
+##set this to the total space available for cache in Gigs.  each part of the mirror gets half
+gl_maxCacheSize=15
+##max cache file age in hours
+gl_maxCacheFileAge=$((2*7*24))
+
+#[cf]
+#[of]:main
+mkdir -vp ${gl_baseMountDir}/{remotefs,blockfs}/m{0..1}
+
+#[of]:menu
+new menu stripedrive
+
+#[c]set | grep gl_hot
+#[c]exit
+
+stripedrive.settitle "really cool raid-01 cloud drive"
+gl_menuindex=0
+stripedrive.additem command "${gl_hotkeys[$((gl_menuindex++))]}" "global - status" '
+  clear
+  pause 10
+'
+stripedrive.additem spacer
+stripedrive.additem command "${gl_hotkeys[$((gl_menuindex++))]}" "something else" '
+  clear
+  pause 10
+'
+
+#[c]stripedrive.open
+
+#[c]  case "${gl_cmd}" in
+#[c]    ru)   fn ${gl_progargs_d:+-d} umountRemotes m0 m1;;
+#[c]    rm)   fn ${gl_progargs_d:+-d} mountRemotes -nc m0 m1;;
+#[c]    rmc)  fn ${gl_progargs_d:+-d} mountRemotes m0 m1;;
+#[c]    
+#[c]    c)    fn ${gl_progargs_d:+-d} createSplitdirs m0 m1;;
+#[c]    
+#[c]    bu)   fn ${gl_progargs_d:+-d} umountBlockfile m0 m1;;
+#[c]    bm)   fn ${gl_progargs_d:+-d} mountBlockfile m0 m1;;
+#[c]
+#[c]    lc)   fn ${gl_progargs_d:+-d} createLoopfiles m0 m1;;
+#[c]    ld)   fn ${gl_progargs_d:+-d} deleteLoopfiles m0 m1;;
+#[c]    
+#[c]    p)    fn ${gl_progargs_d:+-d} purgeRemoteCache m0 m1;;
+#[c]    pd)   echo "pruning .dat files"
+#[c]          for i in $(fn getRemotes m0 m1) remotefs ; do
+#[c]            find ${gl_baseMountDir}/${i} -name "*.dat" -exec rm -vf {} \; &
+#[c]          done
+#[c]          wait
+#[c]          echo "pruning .dat files - done"
+#[c]          ;;
+#[c]    cl)   echo "start - cleanup operation"
+#[c]          for i in $(fn getRemotes m0 m1) ; do
+#[c]            rm -rvf ${gl_baseMountDir}/${i:-emptydir}/* &
+#[c]            rm -rvf ${gl_baseMountDir}/cache/${i}/*
+#[c]          done
+#[c]          wait
+#[c]          rm -rvf ${gl_baseMountDir}/remotefs/m{0..1}/*
+#[c]          rm -rvf ${gl_baseMountDir}/cache/remotefs/*
+#[c]          echo "end   - cleanup operation"
+#[c]          ;;
+#[c]    
+#[c]    s)    echo "m0=${gl_m0Size} m1=$(fn getMirrorSize m1)"
+#[c]          ps ax | grep -v grep | grep rclone
+#[c]          findmnt | grep -E 'fuse\.(rclone|blockfs)'
+#[c]          eval "df -h ${gl_baseMountDir}/{${gl_remoteList}} | grep -v \" /$\""
+#[c]          ;;
+#[c]    ncc)  ncdu ~/.cache/rclone/;;
+#[c]    ncm)  ncdu ~/mnt/;;
+#[c]    duc)  du -hc --max-depth=1 ~/.cache/rclone/vfs/
+#[c]          #du -hc ~/mnt/cache/
+#[c]          ;;
+#[c]    ducf) find ~/.cache/rclone/vfs/ -type f;;
+#[c]    dur)  du -hc ~/mnt/remotefs/;;
+#[c]    dum)  eval "du -hc --max-depth=0 ~/mnt/{${gl_remoteList}}";;
+#[c]    dud)  findmnt -t fuse.rclone | grep -q . && find $(echo $(findmnt -t fuse.rclone | grep ^/ | outarg 1)) -type f;;
+#[c]    fd)   for i in $(fn getRemotes m0 m1) remotefs ; do
+#[c]            find ${gl_baseMountDir}/${i} -name "*.dat" &
+#[c]          done
+#[c]          wait
+#[c]          ;;
+#[c]    mc)
+#[c]          sudo pvcreate ${gl_baseMountDir}/mirrorm0
+#[c]          sudo pvcreate ${gl_baseMountDir}/mirrorm1
+#[c]          sudo vgcreate vg_remote_mirror ${gl_baseMountDir}/mirrorm0 ${gl_baseMountDir}/mirrorm1
+#[c]          sudo lvcreate -l 100%FREE -m 1 -n lv_remote_mirror vg_remote_mirror
+#[c]          ;;
+#[c]    ms)
+#[c]          while true;do lc_status=$(sudo lvs);echo "${lc_status}" | grep lv_remote_mirror | grep -vq 100.00 && { echo "${lc_status}";sleep 2; } || break;done
+#[c]          ;;
+#[c]    dc)
+#[c]          sudo vgchange -ay vg_remote_mirror
+#[c]          sudo mkfs.btrfs -f /dev/vg_remote_mirror/lv_remote_mirror
+#[c]          ;;
+#[c]    dm)
+#[c]          sudo vgchange -ay vg_remote_mirror && \
+#[c]          sudo mount -o compress=zlib,noatime /dev/vg_remote_mirror/lv_remote_mirror ${gl_baseMountDir}/datafs && \
+#[c]          sudo chown tspoolst.tspoolst ${gl_baseMountDir}/datafs || \
+#[c]          die "datafs mount failed"
+#[c]          #rox ${gl_baseMountDir}/datafs
+#[c]          ;;
+#[c]    du)
+#[c]          sudo umount ${gl_baseMountDir}/datafs
+#[c]          sudo vgchange -an vg_remote_mirror
+#[c]          ;;
+#[c]    vgu)  sudo vgchange -ay vg_remote_mirror;;
+#[c]    vgd)  sudo vgchange -an vg_remote_mirror;;
+#[c]    vgs)  sudo vgdisplay -v vg_remote_mirror;;
+#[c]    lvs)  sudo lvdisplay -m /dev/vg_remote_mirror/lv_remote_mirror;;
+#[c]    pvs)  sudo pvscan;;
+#[c]    ut)   tar jxvf ${gl_baseMountDir}/mirror-base.tar.bz2 --keep-directory-symlink -C ${gl_baseMountDir}/;;
+#[c]    ct)   tar jcvf ${gl_baseMountDir}/mirror-base.tar.bz2 -C ${gl_baseMountDir}/ remotefs/;;
+#[c]    cp)   cp -av /storage/data/projects/language datafs/;;
+#[c]    mnt)  $0 -rmc -bm -lc -dm && rox ${gl_baseMountDir}/datafs;;
+#[c]    umnt) $0 -du -ld -bu;;
+#[c]  esac
+
+#[cf]
+
+${gl_progargs_h:-false} && {
+  echo "$(
+    cat $0 | grep -e "^  case" -e "^  esac" -n | outarg 1 "%:" | (
+      read a
+      read b
+      tail -n +$((a + 1)) $0 | head -n $((b - a - 1))
+    ) | grep -oP '^[[:blank:]]+\K[[:alnum:]]+\).+##.*$' | sed -E 's%\) +##% %' | sort | \
+    ( while read a b;do
+        echo -e "-${a}\t${b}"
+      done
+    )
+  )"
+}
+
+for gl_cmd in ${gl_progargs_switchlist} ; do
+  case "${gl_cmd}" in
+    h)    ##show this help message.
+          ;;
+    ru)   ##umount remotes
+          fn ${gl_progargs_d:+-d} umountRemotes m0 m1;;
+    rm)   ##mount remotes - without cache
+          fn ${gl_progargs_d:+-d} mountRemotes -nc m0 m1;;
+    rmc)  ##mount remotes - with cache
+          fn ${gl_progargs_d:+-d} mountRemotes m0 m1;;
+    
+    c)    ##create splitdirs and links to splitdirs
+          fn ${gl_progargs_d:+-d} createSplitdirs m0 m1;;
+    
+    bu)   ##umount blockfs
+          fn ${gl_progargs_d:+-d} umountBlockfile m0 m1;;
+    bm)   ##mount blockfs
+          fn ${gl_progargs_d:+-d} mountBlockfile m0 m1;;
+
+    lc)   ##create loopback links
+          fn ${gl_progargs_d:+-d} createLoopfiles m0 m1;;
+    ld)   ##delete loopback links
+          fn ${gl_progargs_d:+-d} deleteLoopfiles m0 m1;;
+    
+    p)    ##purge remote cache
+          fn ${gl_progargs_d:+-d} purgeRemoteCache m0 m1;;
+    pd)   ##prune .dat files from remotes and remotefs/
+          echo "pruning .dat files"
+          for i in $(fn getRemotes m0 m1) remotefs ; do
+            find ${gl_baseMountDir}/${i} -name "*.dat" -exec rm -vf {} \; &
+          done
+          wait
+          echo "pruning .dat files - done"
+          ;;
+    cl)   ##clean all files from remotes, cache, and remotefs/
+          echo "start - cleanup operation"
+          for i in $(fn getRemotes m0 m1) ; do
+            rm -rvf ${gl_baseMountDir}/${i:-emptydir}/* &
+            rm -rvf ${gl_baseMountDir}/cache/${i}/*
+          done
+          wait
+          rm -rvf ${gl_baseMountDir}/remotefs/m{0..1}/*
+          rm -rvf ${gl_baseMountDir}/cache/remotefs/*
+          echo "end   - cleanup operation"
+          ;;
+    
+    s)    ##show current status
+          echo "m0=${gl_m0Size} m1=$(fn getMirrorSize m1) $((gl_m0Size))"
+          ps ax | grep -v grep | grep rclone
+          findmnt | grep -E 'fuse\.(rclone|blockfs)'
+          eval "df -h ${gl_baseMountDir}/{${gl_remoteList}} | grep -v \" /$\""
+          ;;
+    ncc)  ##ncdu of cache
+          ncdu ~/.cache/rclone/;;
+    ncm)  ##ncdu of mounts
+          ncdu ~/mnt/;;
+    duc)  ##du of cache
+          du -hc --max-depth=1 ~/.cache/rclone/vfs/
+          #du -hc ~/mnt/cache/
+          ;;
+    ducf) ##find .dat files in cache
+          find ~/.cache/rclone/vfs/ -type f;;
+    dur)  ##du of remotefs/
+          du -hc ~/mnt/remotefs/;;
+    dum)  ##du of remotes
+          eval "du -hc --max-depth=0 ~/mnt/{${gl_remoteList}}";;
+    dud)  ##show all files on currently mounted remotes
+          findmnt -t fuse.rclone | grep -q . && find $(echo $(findmnt -t fuse.rclone | grep ^/ | outarg 1)) -type f;;
+    fd)   ##show all .dat files on remotes and remotefs/
+          for i in $(fn getRemotes m0 m1) remotefs ; do
+            find ${gl_baseMountDir}/${i} -name "*.dat" &
+          done
+          wait
+          ;;
+    mc)   ##create lvm mirror
+          sudo pvcreate ${gl_baseMountDir}/mirrorm0
+          sudo pvcreate ${gl_baseMountDir}/mirrorm1
+          sudo vgcreate vg_remote_mirror ${gl_baseMountDir}/mirrorm0 ${gl_baseMountDir}/mirrorm1
+          sudo lvcreate -l 100%FREE -m 1 -n lv_remote_mirror vg_remote_mirror
+          ;;
+    ms)   ##show lvm mirror status
+          while true;do lc_status=$(sudo lvs);echo "${lc_status}" | grep lv_remote_mirror | grep -vq 100.00 && { echo "${lc_status}";sleep 2; } || break;done
+          ;;
+    dc)   ##create datafs/ filesystem
+          sudo vgchange -ay vg_remote_mirror
+          sudo mkfs.btrfs -f /dev/vg_remote_mirror/lv_remote_mirror
+          ;;
+    dm)   ##mount datafs/
+          sudo vgchange -ay vg_remote_mirror && \
+          sudo mount -o compress=zlib,noatime /dev/vg_remote_mirror/lv_remote_mirror ${gl_baseMountDir}/datafs && \
+          sudo chown tspoolst.tspoolst ${gl_baseMountDir}/datafs || \
+          die "datafs mount failed"
+          #rox ${gl_baseMountDir}/datafs
+          ;;
+    du)   ##umount datafs/
+          sudo umount ${gl_baseMountDir}/datafs
+          sudo vgchange -an vg_remote_mirror
+          ;;
+    vgu)  ##up mirror volume group
+          sudo vgchange -ay vg_remote_mirror;;
+    vgd)  ##down mirror volume group
+          sudo vgchange -an vg_remote_mirror;;
+    vgs)  ##show volume group status
+          sudo vgdisplay -v vg_remote_mirror;;
+    lvs)  ##show logical volume status
+          sudo lvdisplay -m /dev/vg_remote_mirror/lv_remote_mirror;;
+    pvs)  ##show physical volumes status
+          sudo pvscan;;
+    ut)   ##extract backed up .dat files
+          tar jxvf ${gl_baseMountDir}/mirror-base.tar.bz2 --keep-directory-symlink -C ${gl_baseMountDir}/;;
+    ct)   ##backup current .dat files
+          tar jcvf ${gl_baseMountDir}/mirror-base.tar.bz2 -C ${gl_baseMountDir}/ remotefs/;;
+    cp)   ##copy test files onto filesystem
+          cp -av /storage/data/projects/language datafs/;;
+    mnt)  ##mount everything from 0 up to datafs/, same as -rmc -bm -lc -dm, also launches rox
+          $0 -rmc -bm -lc -dm && rox ${gl_baseMountDir}/datafs;;
+    umnt) ##umount everything from datafs/ back to down 1, same as -rmc -bm -lc -dm, must be followed with -ru to get to 0
+          $0 -du -ld -bu;;
+  esac
+done
+
+exit ${gl_return}
+
+sudo lvdisplay -m /dev/vg_remote_mirror/lv_remote_mirror
+sudo vgdisplay -v vg_remote_mirror
+sudo pvdisplay -m
+
+
+find remotefs/
+find dropbox/ box/ jotta/ -type f;echo;find mega/ -type f
+
+
+echo -e "g\nn\np\n\n\n\nt\n31\nw" | sudo fdisk mirrorm0
+echo -e "g\nn\np\n\n\n\nt\n31\nw" | sudo fdisk mirrorm1
+sudo partprobe mirrorm*
+
+echo -e "g\nn\np\n\n\n\nt\n31\nw" | sudo fdisk mirror${1};sudo partprobe mirror${1}
+
+
+#[cf]
+# vim:number:tabstop=2:shiftwidth=2:autoindent:foldmethod=marker:foldlevel=0:foldmarker=#[of]\:,#[cf]
