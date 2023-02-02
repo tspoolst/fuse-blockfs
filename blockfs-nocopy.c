@@ -47,6 +47,7 @@
 #define SHOW_MESSAGES_WRITES 0
 #define SHOW_MESSAGES_SIZES 0
 #define USE_NEW_DEV_CODE 0
+#define USE_NEW_FILE_HANDLE_CODE 1
 
 #include <fuse.h>
 #include <stdio.h>
@@ -69,9 +70,11 @@
 #include <stdarg.h>
 //[cf]
 //[of]:global vars declaration
-off_t blockFileSize;
-long int chunkSize;
-int mount_splits;
+off_t gl_blockFileSize;
+long int gl_chunkSize;
+int gl_mountSplits;
+char gl_debugMessageCurrent[120];
+char gl_debugMessageLast[120];
 //[cf]
 //[of]:command line options
 /*
@@ -83,41 +86,41 @@ int mount_splits;
  */
 //[of]:static struct options {
 static struct options {
-	const char *local_store;
-	const char *blockfile_size;
-	const char *chunk_size;
-	const char *mount_splits;
-	int show_help;
+  const char *local_store;
+  const char *blockfile_size;
+  const char *chunk_size;
+  const char *mount_splits;
+  int show_help;
 } options;
 //[cf]
 //[of]:static const struct fuse_opt option_spec[] = {
 #define OPTION(t, p)                           \
     { t, offsetof(struct options, p), 1 }
 static const struct fuse_opt option_spec[] = {
-	OPTION("--local=%s", local_store),
-	OPTION("--blockfile-size=%s", blockfile_size),
-	OPTION("--chunk-size=%s", chunk_size),
-	OPTION("--mount-splits=%s", mount_splits),
-	OPTION("-h", show_help),
-	OPTION("--help", show_help),
-	FUSE_OPT_END
+  OPTION("--local=%s", local_store),
+  OPTION("--blockfile-size=%s", blockfile_size),
+  OPTION("--chunk-size=%s", chunk_size),
+  OPTION("--mount-splits=%s", mount_splits),
+  OPTION("-h", show_help),
+  OPTION("--help", show_help),
+  FUSE_OPT_END
 };
 //[cf]
 //[of]:static void show_help(const char *progname)
 static void show_help(const char *progname)
 {
-	printf("usage: %s [options] <mountpoint>\n\n", progname);
-	printf("File-system specific options:\n"
-	       "    --local=<s>            Name of the \"local\" backingstore mountpoint\n"
-	       "                             (default: \"/mnt/localfs/\")\n"
-	       "    --blockfile-size=<s>   Size of the \"block\" file in megs\n"
-	       "                             (default: \"2048\")\n"
-	       "    --chunk-size=<s>       Size of the \"chunk\" files in megs\n"
-	       "                             (default: \"5\")\n"
-	       "    --mount-splits=<s>     Size of the mount splits.\n"
-	       "                           Used for evenly spreading chunks across multiple mounts\n"
-	       "                             (default: \"6\")\n"
-	       "\n");
+  printf("usage: %s [options] <mountpoint>\n\n", progname);
+  printf("File-system specific options:\n"
+         "    --local=<s>            Name of the \"local\" backingstore mountpoint\n"
+         "                             (default: \"/mnt/localfs/\")\n"
+         "    --blockfile-size=<s>   Size of the \"block\" file in megs\n"
+         "                             (default: \"2048\")\n"
+         "    --chunk-size=<s>       Size of the \"chunk\" files in megs\n"
+         "                             (default: \"5\")\n"
+         "    --mount-splits=<s>     Size of the mount splits.\n"
+         "                           Used for evenly spreading chunks across multiple mounts\n"
+         "                             (default: \"6\")\n"
+         "\n");
 }
 //[cf]
 //[cf]
@@ -284,7 +287,7 @@ int is_empty(const char *buf, size_t size)
 void printft( const char* string, ... ) {
   time_t rawtime = time(NULL);
   struct tm *ptm = localtime(&rawtime);
-  
+
   struct timeval  tv;
   gettimeofday(&tv, NULL);
   double time_in_mill = (tv.tv_usec) / 1000 ; // convert tv_sec & tv_usec to millisecond
@@ -315,17 +318,17 @@ extern int errno;
 static int blockfs_readblocks(char *buf, size_t size, off_t offset)
 {
 //[of]:  setup vars
-	int res;
+  int res;
 
   long int chunkOffset;
   unsigned int chunkId;
   long int driveIndex;
 
-	size_t bufferOffset = 0;
-	size_t bufferRemaining = size;
-	size_t readLength;
-	
-	size_t filesize;
+  size_t bufferOffset = 0;
+  size_t bufferRemaining = size;
+  size_t readLength;
+
+  size_t filesize;
 
   char chunkIdText[12];
   char driveIndexText[4];
@@ -333,16 +336,16 @@ static int blockfs_readblocks(char *buf, size_t size, off_t offset)
   char dirLevel2[3];
   char dirLevel3[3];
   char dirLevel4[3];
-  char fileName[100];
+  char fileName[256];
 
 
   FILE *file_ptr = NULL;
 //[cf]
 //[of]:	while (bufferRemaining > 0) {
-	while (bufferRemaining > 0) {
-  	chunkId = (offset + bufferOffset) / chunkSize;
-  	chunkOffset = (offset + bufferOffset) % chunkSize;
-  	driveIndex = chunkId % mount_splits + 1;
+  while (bufferRemaining > 0) {
+    chunkId = (offset + bufferOffset) / gl_chunkSize;
+    chunkOffset = (offset + bufferOffset) % gl_chunkSize;
+    driveIndex = chunkId % gl_mountSplits + 1;
     
 //[of]:    encode chunk filename
     sprintf(chunkIdText, "%08d", chunkId);
@@ -377,16 +380,56 @@ static int blockfs_readblocks(char *buf, size_t size, off_t offset)
     strcat(fileName, ".dat");
 //[cf]
 
-		readLength = MIN(chunkSize - chunkOffset, bufferRemaining);
+//[c]if filename has not changed
+//[c]  no need to close and re-open the same file
+
+    readLength = MIN(gl_chunkSize - chunkOffset, bufferRemaining);
 
     //fill buffer with all 0s first
     memset(buf + bufferOffset, 0, readLength);
 
+//[of]:    #if SHOW_MESSAGES_READ_AND_SKIPS == 1
     #if SHOW_MESSAGES_READ_AND_SKIPS == 1
-    printft("reading  %s", fileName);
+      sprintf(gl_debugMessageCurrent, "reading ----------- %s", fileName);
+      if (strcmp(gl_debugMessageCurrent, gl_debugMessageLast) != 0) {
+        printft("%s", gl_debugMessageCurrent);
+        strcpy(gl_debugMessageLast,gl_debugMessageCurrent);
+      }
     #endif
+//[cf]
 
-//[of]:    if( access( srcFilenameLocal, F_OK ) != -1 ) {
+#if USE_NEW_FILE_HANDLE_CODE == 1
+//[c]the read/write size calls are always 4096 bytes
+//[c]  not sure why
+//[c]  to do the file open/close reduction of calls the file write/read names and handles need to survive between calls.
+    if( access( fileName, F_OK ) != -1 ) {
+      // file exists
+
+      file_ptr = fopen(fileName,"rb");  // r open for reading, b for binary
+
+      //get size of file
+      fseek(file_ptr, 0L, SEEK_END);
+      filesize = ftell(file_ptr);
+      fseek(file_ptr, 0L, SEEK_SET);
+
+      if (chunkOffset < filesize) {
+        readLength = MIN(filesize - chunkOffset, readLength);
+        fseek(file_ptr, chunkOffset, SEEK_SET);
+        res = fread(buf + bufferOffset, readLength, 1, file_ptr); // read bytes to buffer
+      }
+
+      fclose(file_ptr);
+      if (res == -1) {
+        res = -errno;
+        return res;
+      }
+    }
+
+    bufferRemaining -= readLength;
+    bufferOffset += readLength;
+    if (bufferRemaining == 0)
+      return size;
+#else
     if( access( fileName, F_OK ) != -1 ) {
       // file exists
       
@@ -397,29 +440,27 @@ static int blockfs_readblocks(char *buf, size_t size, off_t offset)
       filesize = ftell(file_ptr);
       fseek(file_ptr, 0L, SEEK_SET);
 
-//[of]:      if (chunkOffset < filesize) {
       if (chunkOffset < filesize) {
         readLength = MIN(filesize - chunkOffset, readLength);
         fseek(file_ptr, chunkOffset, SEEK_SET);
         res = fread(buf + bufferOffset, readLength, 1, file_ptr); // read bytes to buffer
       }
-//[cf]
 
       fclose(file_ptr);
-    	if (res == -1) {
-    		res = -errno;
+      if (res == -1) {
+        res = -errno;
         return res;
       }
     }
-//[cf]
     
-		bufferRemaining -= readLength;
-		bufferOffset += readLength;
-		if (bufferRemaining == 0)
-			return size;
-	}
+    bufferRemaining -= readLength;
+    bufferOffset += readLength;
+    if (bufferRemaining == 0)
+      return size;
+#endif
+  }
 //[cf]
-	return 0;
+  return 0;
 }
 //[cf]
 //[of]:static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
@@ -439,9 +480,9 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
   unsigned int chunkId;
   long int driveIndex;
 
-	size_t bufferOffset = 0;
-	size_t bufferRemaining = size;
-	size_t writeLength;
+  size_t bufferOffset = 0;
+  size_t bufferRemaining = size;
+  size_t writeLength;
 
 
 
@@ -451,8 +492,8 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
   char dirLevel2[3];
   char dirLevel3[3];
   char dirLevel4[3];
-  char fileName[100];
-  char filePath[100];
+  char fileName[256];
+  char filePath[256];
 
   FILE *file_ptr = NULL;
 
@@ -462,10 +503,10 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
 //[c]if chunk is all 0s, delete it.
 //[c]  how to figure out chunk is empty without loading the whole thing into memory?
 //[c]static struct chunkmeta {
-//[c]	// each bit represents
-//[c]	const char *bitmap;
-//[c]	unsigned int chunkId;
-//[c]	
+//[c]  // each bit represents
+//[c]  const char *bitmap;
+//[c]  unsigned int chunkId;
+//[c]
 //[c]} chunkmeta;
 //[c]
 //[c]chunkmeta chunk
@@ -473,11 +514,11 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
 
 //[cf]
 //[of]:	while (bufferRemaining > 0) {
-	while (bufferRemaining > 0) {
-  	chunkId = (offset + bufferOffset) / chunkSize;
-  	chunkOffset = (offset + bufferOffset) % chunkSize;
-  	driveIndex = chunkId % mount_splits + 1;
-  	
+  while (bufferRemaining > 0) {
+    chunkId = (offset + bufferOffset) / gl_chunkSize;
+    chunkOffset = (offset + bufferOffset) % gl_chunkSize;
+    driveIndex = chunkId % gl_mountSplits + 1;
+
 //[of]:    encode chunk filename
     sprintf(chunkIdText, "%08d", chunkId);
     sprintf(driveIndexText, "%01ld", driveIndex);
@@ -511,31 +552,50 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
     strcat(fileName, ".dat");
 //[cf]
 
-		writeLength = MIN(chunkSize - chunkOffset, bufferRemaining);
+//[c]    if filename has not changed
+//[c]      no need to close and re-open the same file
 
+    writeLength = MIN(gl_chunkSize - chunkOffset, bufferRemaining);
+
+//[of]:    #if SHOW_MESSAGES_SIZES == 1
     #if SHOW_MESSAGES_SIZES == 1
     printft("offset %lu -- bufferRemaining %lu -- writeLength %lu -- bufferOffset %lu -- chunkId %lu -- chunkOffset %lu",
       offset,
       bufferRemaining,
       writeLength,
       bufferOffset,
-    	chunkId,
-    	chunkOffset
+      chunkId,
+      chunkOffset
     );
     #endif
+//[cf]
 
 #if USE_NEW_DEV_CODE == 1
-    if (writeLength == chunkSize && is_empty(buf + bufferOffset, writeLength)) {
+    if (writeLength == gl_chunkSize && is_empty(buf + bufferOffset, writeLength)) {
       //if entire chunk is zero, delete it.
+//[of]:      #if SHOW_MESSAGES_READ_AND_SKIPS == 1
       #if SHOW_MESSAGES_READ_AND_SKIPS == 1
-      printft("skipping/removing %s", fileName);
+        sprintf(gl_debugMessageCurrent, "skipping/removing - %s", fileName);
+        if (strcmp(gl_debugMessageCurrent, gl_debugMessageLast) != 0) {
+          printft("%s", gl_debugMessageCurrent);
+          strcpy(gl_debugMessageLast,gl_debugMessageCurrent);
+        }
       #endif
+//[cf]
       if( access( fileName, F_OK ) == 0 ) {
         // file exists
         if (remove(fileName) != 0) printf("unable to delete -- %s\n", fileName);
+//[of]:        #if SHOW_MESSAGES_WRITES == 1
         #if SHOW_MESSAGES_WRITES == 1
-        else printf("deleted          -- %s\n", fileName);
+        else {
+          sprintf(gl_debugMessageCurrent, "deleted ----------- %s", fileName);
+          if (strcmp(gl_debugMessageCurrent, gl_debugMessageLast) != 0) {
+            printft("%s", gl_debugMessageCurrent);
+            strcpy(gl_debugMessageLast,gl_debugMessageCurrent);
+          }
+        }
         #endif
+//[cf]
       }
     }
     else if (is_empty(buf + bufferOffset, writeLength) && access( fileName, F_OK ) == -1) {
@@ -543,15 +603,27 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
     if (is_empty(buf + bufferOffset, writeLength) && access( fileName, F_OK ) == -1) {
 #endif
       //if buffer section is empty and file does not exist, do nothing.
+//[of]:      #if SHOW_MESSAGES_READ_AND_SKIPS == 1
       #if SHOW_MESSAGES_READ_AND_SKIPS == 1
-      printft("skipping write %s", fileName);
+        sprintf(gl_debugMessageCurrent, "skipping write ---- %s", fileName);
+        if (strcmp(gl_debugMessageCurrent, gl_debugMessageLast) != 0) {
+          printft("%s", gl_debugMessageCurrent);
+          strcpy(gl_debugMessageLast,gl_debugMessageCurrent);
+        }
       #endif
+//[cf]
       ;
     }
     else {
+//[of]:      #if SHOW_MESSAGES_WRITES == 1
       #if SHOW_MESSAGES_WRITES == 1
-      printft("writing/creating  %s", fileName);
+        sprintf(gl_debugMessageCurrent, "writing/creating -- %s", fileName);
+        if (strcmp(gl_debugMessageCurrent, gl_debugMessageLast) != 0) {
+          printft("%s", gl_debugMessageCurrent);
+          strcpy(gl_debugMessageLast,gl_debugMessageCurrent);
+        }
       #endif
+//[cf]
       
       //mkdir path if it doesn't exist
       _mkdir(filePath);
@@ -568,13 +640,13 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
       fclose(file_ptr);
     }
 
-		bufferRemaining -= writeLength;
-		bufferOffset += writeLength;
-		if (bufferRemaining == 0)
-			return size;
-	}
+    bufferRemaining -= writeLength;
+    bufferOffset += writeLength;
+    if (bufferRemaining == 0)
+      return size;
+  }
 //[cf]
-	return 0;
+  return 0;
 }
 //[cf]
 //[cf]
@@ -582,38 +654,38 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
 //[of]:static int blockfs_getattr(const char *path, struct stat *stbuf,
 static int blockfs_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
 {
-	(void) fi;
-	int res = 0;
+  (void) fi;
+  int res = 0;
 
-	memset(stbuf, 0, sizeof(struct stat));
-	if (strcmp(path, "/") == 0) {
-		stbuf->st_mode = S_IFDIR | 0755;
-		stbuf->st_nlink = 2;
-	} else if (strcmp(path+1, "block") == 0) {
-		stbuf->st_mode = S_IFREG | 0666;
-		stbuf->st_nlink = 1;
-		stbuf->st_size = (long long) blockFileSize;
-	} else
-		res = -ENOENT;
+  memset(stbuf, 0, sizeof(struct stat));
+  if (strcmp(path, "/") == 0) {
+    stbuf->st_mode = S_IFDIR | 0755;
+    stbuf->st_nlink = 2;
+  } else if (strcmp(path+1, "block") == 0) {
+    stbuf->st_mode = S_IFREG | 0666;
+    stbuf->st_nlink = 1;
+    stbuf->st_size = (long long) gl_blockFileSize;
+  } else
+    res = -ENOENT;
 
-	return res;
+  return res;
 }
 //[cf]
 //[of]:static int blockfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 static int blockfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi, enum fuse_readdir_flags flags)
 {
-	(void) offset;
-	(void) fi;
-	(void) flags;
+  (void) offset;
+  (void) fi;
+  (void) flags;
 
-	if (strcmp(path, "/") != 0)
-		return -ENOENT;
+  if (strcmp(path, "/") != 0)
+    return -ENOENT;
 
-	filler(buf, ".", NULL, 0, 0);
-	filler(buf, "..", NULL, 0, 0);
-	filler(buf, "block", NULL, 0, 0);
+  filler(buf, ".", NULL, 0, 0);
+  filler(buf, "..", NULL, 0, 0);
+  filler(buf, "block", NULL, 0, 0);
 
-	return 0;
+  return 0;
 }
 //[cf]
 //[c]
@@ -621,53 +693,53 @@ static int blockfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, 
 //[of]:static int blockfs_open(const char *path, struct fuse_file_info *fi)
 static int blockfs_open(const char *path, struct fuse_file_info *fi)
 {
-	if (strcmp(path+1, "block") != 0)
-		return -ENOENT;
+  if (strcmp(path+1, "block") != 0)
+    return -ENOENT;
 
-	return 0;
+  return 0;
 }
 //[cf]
 //[of]:static int blockfs_read(const char *path, char *buf, size_t size, off_t offset,
 static int blockfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-	(void) fi;
-	if(strcmp(path+1, "block") != 0)
-		return -ENOENT;
+  (void) fi;
+  if(strcmp(path+1, "block") != 0)
+    return -ENOENT;
 
-  if (offset + size > blockFileSize)
+  if (offset + size > gl_blockFileSize)
     return -ENOSPC;
 
-	size = blockfs_readblocks(buf, size, offset);
+  size = blockfs_readblocks(buf, size, offset);
 
-	return size;
+  return size;
 }
 //[cf]
 //[of]:static int blockfs_write(const char *path, const char *buf, size_t size,
 static int blockfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-	(void) fi;
-	if(strcmp(path+1, "block") != 0)
-		return -ENOENT;
+  (void) fi;
+  if(strcmp(path+1, "block") != 0)
+    return -ENOENT;
 
-  if (offset + size > blockFileSize)
+  if (offset + size > gl_blockFileSize)
     return -ENOSPC;
 
-	size = blockfs_writeblocks(buf, size, offset);
+  size = blockfs_writeblocks(buf, size, offset);
 
-	return size;
+  return size;
 }
 //[cf]
 //[of]:static int blockfs_fsync(const char *path, int isdatasync,
 static int blockfs_fsync(const char *path, int isdatasync,
-		     struct fuse_file_info *fi)
+         struct fuse_file_info *fi)
 {
-	/* Just a stub.	 This method is optional and can safely be left
-	   unimplemented */
+  /* Just a stub.   This method is optional and can safely be left
+     unimplemented */
 
-	(void) path;
-	(void) isdatasync;
-	(void) fi;
-	return 0;
+  (void) path;
+  (void) isdatasync;
+  (void) fi;
+  return 0;
 }
 //[cf]
 //[cf]
@@ -676,78 +748,84 @@ static int blockfs_fsync(const char *path, int isdatasync,
 //[of]:static void *blockfs_init(struct fuse_conn_info *conn,
 static void *blockfs_init(struct fuse_conn_info *conn, struct fuse_config *cfg)
 {
-	(void) conn;
-	cfg->use_ino = 1;
+  (void) conn;
+  cfg->use_ino = 1;
 
-	/* Pick up changes from lower filesystem right away. This is
-	   also necessary for better hardlink support. When the kernel
-	   calls the unlink() handler, it does not know the inode of
-	   the to-be-removed entry and can therefore not invalidate
-	   the cache of the associated inode - resulting in an
-	   incorrect st_nlink value being reported for any remaining
-	   hardlinks to this inode. */
-	cfg->entry_timeout = 0;
-	cfg->attr_timeout = 0;
-	cfg->negative_timeout = 0;
+  /* Pick up changes from lower filesystem right away. This is
+     also necessary for better hardlink support. When the kernel
+     calls the unlink() handler, it does not know the inode of
+     the to-be-removed entry and can therefore not invalidate
+     the cache of the associated inode - resulting in an
+     incorrect st_nlink value being reported for any remaining
+     hardlinks to this inode. */
+  cfg->entry_timeout = 0;
+  cfg->attr_timeout = 0;
+  cfg->negative_timeout = 0;
 
-	return NULL;
+  return NULL;
 }
 //[cf]
 //[of]:static struct fuse_operations blockfs_oper = {
 static struct fuse_operations blockfs_oper = {
-	.init     = blockfs_init,
-	.getattr	= blockfs_getattr,
-	.readdir	= blockfs_readdir,
-	.open     = blockfs_open,
-	.read     = blockfs_read,
-	.write		= blockfs_write,
-	.fsync		= blockfs_fsync,
+  .init     = blockfs_init,
+  .getattr  = blockfs_getattr,
+  .readdir  = blockfs_readdir,
+  .open     = blockfs_open,
+  .read     = blockfs_read,
+  .write    = blockfs_write,
+  .fsync    = blockfs_fsync,
 };
 //[cf]
 //[of]:int main(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
-	int ret;
-	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+  int ret;
+  struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 
-	/* Set defaults -- we have to use strdup so that
-	   fuse_opt_parse can free the defaults if other
-	   values are specified */
-	options.local_store = strdup("/mnt/localfs/");
-	options.blockfile_size = strdup("2048");
-	options.chunk_size = strdup("5");
-	options.mount_splits = strdup("6");
+  // set last debug message to empty
+  gl_debugMessageLast[0] = '\0';
 
-	/* Parse options */
-	if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
-		return 1;
+  /* Set defaults -- we have to use strdup so that
+     fuse_opt_parse can free the defaults if other
+     values are specified */
+//[c]  todo:
+//[c]    must add trailing / if it does not exist to the local_store option.
+//[c]    if last character in string is not / inc 1 and add /\0
+  options.local_store = strdup("/mnt/localfs/");
+  options.blockfile_size = strdup("2048");
+  options.chunk_size = strdup("5");
+  options.mount_splits = strdup("6");
+
+  /* Parse options */
+  if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
+    return 1;
 
   // enable single thread operation cuz this doesn't work with multi-threaded
   fuse_opt_add_arg(&args, "-s");
 
   #if SHOW_MESSAGES_MISC == 1
   fuse_opt_add_arg(&args, "-f");
-	printft("and we're off!");
+  printft("and we're off!");
   #endif
 
-	/* When --help is specified, first print our own file-system
-	   specific help text, then signal fuse_main to show
-	   additional help (by adding `--help` to the options again)
-	   without usage: line (by setting argv[0] to the empty
-	   string) */
-	if (options.show_help) {
-		show_help(argv[0]);
-		assert(fuse_opt_add_arg(&args, "--help") == 0);
-		args.argv[0][0] = '\0';
-	}
-	
-	blockFileSize = (long long) 1024 * 1024 * atol(options.blockfile_size);
-	chunkSize = (long int) 1024 * 1024 * atoi(options.chunk_size);
-	mount_splits = atoi(options.mount_splits);
+  /* When --help is specified, first print our own file-system
+     specific help text, then signal fuse_main to show
+     additional help (by adding `--help` to the options again)
+     without usage: line (by setting argv[0] to the empty
+     string) */
+  if (options.show_help) {
+    show_help(argv[0]);
+    assert(fuse_opt_add_arg(&args, "--help") == 0);
+    args.argv[0][0] = '\0';
+  }
 
-	ret = fuse_main(args.argc, args.argv, &blockfs_oper, NULL);
-	fuse_opt_free_args(&args);
-	return ret;
+  gl_blockFileSize = (long long) 1024 * 1024 * atol(options.blockfile_size);
+  gl_chunkSize = (long int) 1024 * 1024 * atoi(options.chunk_size);
+  gl_mountSplits = atoi(options.mount_splits);
+
+  ret = fuse_main(args.argc, args.argv, &blockfs_oper, NULL);
+  fuse_opt_free_args(&args);
+  return ret;
 }
 //[cf]
 //[cf]

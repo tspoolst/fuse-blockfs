@@ -41,13 +41,14 @@
 #define BLOCKSIZE 1024 * 1024 * 1024 * 1024 * 4
 #define MOUNTSPLITS 6
 
-#define FILEPATHREMOTE "/media/tspoolst/remotefs/"
-#define FILEPATHLOCAL "/media/tspoolst/localfs/"
-
 #ifdef linux
 /* For pread()/pwrite()/utimensat() */
 #define _XOPEN_SOURCE 700
 #endif
+
+#define SHOW_MESSAGES_READ_AND_SKIPS 0
+#define SHOW_MESSAGES_WRITES 0
+#define SHOW_MESSAGES_COPY_STATUS_BAR 0
 
 #include <fuse.h>
 #include <stdio.h>
@@ -63,6 +64,14 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/param.h>
+
+#include <sys/time.h>
+
+#include <stdarg.h>
+//[cf]
+//[of]:global vars declaration
+char gl_debugMessageCurrent[300];
+char gl_debugMessageLast[300];
 //[cf]
 //[of]:command line options
 /*
@@ -117,26 +126,39 @@ static void show_help(const char *progname)
 //[cf]
 //[cf]
 //[of]:local methods
-//[of]:static void *blockfs_checkdir(const char *filename)
-static void *blockfs_checkdir(const char *dirName)
-{
-  int e;
-  struct stat sb;
-  
-  e = stat(dirName, &sb);
-  if (e == 0) {
-    if (sb.st_mode & S_IFREG)
-      exit (2);
-  } else {
-    if (errno = ENOENT) {
-//[c]      printf("dirname %s\n",dirName);
-      e = mkdir(dirName, S_IRWXU);
-      if (e != 0) {
-        exit (3);
-      }
-    }
-  }
-  return NULL;
+//[of]:static void _mkdir(const char *dir) {
+static void _mkdir(const char *dir) {
+    char tmp[256];
+    char *p = NULL;
+    size_t len;
+
+    int e;
+    struct stat sb;
+
+
+    snprintf(tmp, sizeof(tmp),"%s",dir);
+    len = strlen(tmp);
+    if (tmp[len - 1] == '/')
+        tmp[len - 1] = 0;
+    for (p = tmp + 1; *p; p++)
+        if (*p == '/') {
+            *p = 0;
+            e = stat(tmp, &sb);
+            if (e == 0) {
+              if (sb.st_mode & S_IFREG)
+                exit (2);
+            } else {
+              if (errno = ENOENT) {
+//[c]                printft("dirname %s",tmp);
+                e = mkdir(tmp, S_IRWXU);
+                if (e != 0) {
+                  exit (3);
+                }
+              }
+            }
+            *p = '/';
+        }
+    mkdir(tmp, S_IRWXU);
 }
 //[cf]
 //[of]:long long round_closest(long long dividend, unsigned int divisor)
@@ -149,7 +171,6 @@ long long round_closest(long long dividend, unsigned int divisor)
 int cp(const char *from, const char *to)
 {
     int   c;
-//[c]    long int   n;
     FILE *stream_R;
     FILE *stream_W; 
 
@@ -164,20 +185,43 @@ int cp(const char *from, const char *to)
         return -2;
      }
 
-//[c]    n = 0;
-//[c]    printf("|");
+#if SHOW_MESSAGES_COPY_STATUS_BAR == 1
+    long int n = 0;
+    printf("|");
     while ((c = fgetc(stream_R)) != EOF) {
-//[c]      if (n % ((long int) 1024 * 1024 * atoi(options.chunk_size) / 20) + 1 == ((long int) 1024 * 1024 * atoi(options.chunk_size) / 20))
-//[c]        printf("-");
+      if (n % ((long int) 1024 * 1024 * atoi(options.chunk_size) / 20) + 1 == ((long int) 1024 * 1024 * atoi(options.chunk_size) / 20))
+        printf("-");
       fputc (c, stream_W);
-//[c]      n += 1;
+      n += 1;
     }
-//[c]    printf("|\n");
+    printf("|\n");
+#else
+    while ((c = fgetc(stream_R)) != EOF) {
+      fputc (c, stream_W);
+    }
+#endif
 
     fclose (stream_R);
     fclose (stream_W);
 
     return 0;
+}
+//[cf]
+//[of]:void printft( const char* string, ... ) {
+void printft( const char* string, ... ) {
+  time_t rawtime = time(NULL);
+  struct tm *ptm = localtime(&rawtime);
+
+  struct timeval  tv;
+  gettimeofday(&tv, NULL);
+  double time_in_mill = (tv.tv_usec) / 1000 ; // convert tv_sec & tv_usec to millisecond
+
+  va_list args;
+  printf("%02d:%02d:%02d:%03d -- ", ptm->tm_hour, ptm->tm_min, ptm->tm_sec, (int) time_in_mill);
+  va_start( args, string );
+  vprintf( string, args );
+  va_end( args );
+//[c]  printf( "\n" );
 }
 //[cf]
 //[cf]
@@ -217,8 +261,11 @@ static int blockfs_readblocks(char *buf, size_t size, off_t offset)
   char dirLevel2[3];
   char dirLevel3[3];
   char dirLevel4[3];
-  char srcFilenameLocal[100];
-  char srcFilenameRemote[100];
+  char filePathSuffix[9];
+  char fileName[7];
+  char filePathLocal[256];
+  char fileNameLocal[256];
+  char fileNameRemote[256];
 
   FILE *file_ptr = NULL;
 //[cf]
@@ -241,90 +288,72 @@ static int blockfs_readblocks(char *buf, size_t size, off_t offset)
     memcpy( dirLevel4, &chunkIdText[6], 2 );
     dirLevel4[2] = '\0';
 
+    strcpy(fileName, dirLevel4);
+    strcat(fileName, ".dat");
 
-    strcpy(srcFilenameRemote, options.remote_store);
+    strcpy(filePathSuffix, dirLevel1);
+    strcat(filePathSuffix, "/");
+    strcat(filePathSuffix, dirLevel2);
+    strcat(filePathSuffix, "/");
+    strcat(filePathSuffix, dirLevel3);
 
-    strcat(srcFilenameRemote, driveIndexText);
-    strcat(srcFilenameRemote, "/");
-
-    strcat(srcFilenameRemote, dirLevel1);
-    strcat(srcFilenameRemote, "/");
-
-    strcat(srcFilenameRemote, dirLevel2);
-    strcat(srcFilenameRemote, "/");
-
-    strcat(srcFilenameRemote, dirLevel3);
-    strcat(srcFilenameRemote, "/");
-
-    strcat(srcFilenameRemote, dirLevel4);
-    strcat(srcFilenameRemote, ".dat");
-
-
-    strcpy(srcFilenameLocal, options.local_store);
-
-    strcat(srcFilenameLocal, driveIndexText);
-    strcat(srcFilenameLocal, "/");
-
-    strcat(srcFilenameLocal, dirLevel1);
-    strcat(srcFilenameLocal, "/");
-
-    strcat(srcFilenameLocal, dirLevel2);
-    strcat(srcFilenameLocal, "/");
-
-    strcat(srcFilenameLocal, dirLevel3);
-    strcat(srcFilenameLocal, "/");
-
-    strcat(srcFilenameLocal, dirLevel4);
-    strcat(srcFilenameLocal, ".dat");
+    strcpy(fileNameLocal, options.local_store);
+    strcat(fileNameLocal, driveIndexText);
+    strcat(fileNameLocal, "/");
+    strcat(fileNameLocal, filePathSuffix);
+    strcpy(filePathLocal, fileNameLocal);
+    strcat(fileNameLocal, "/");
+    strcat(fileNameLocal, fileName);
 //[cf]
 
 		readLength = MIN(chunkSize - chunkOffset, bufferRemaining);
 
     memset(buf + bufferOffset, 0, readLength);
 
-//[of]:    if( access( filename, F_OK ) != -1 ) {
-    if( access( srcFilenameLocal, F_OK ) == -1 ) {
-//[c]      printf("local file %s not found\n",srcFilenameLocal);
-      // file exists
-      if( access( srcFilenameRemote, F_OK ) != -1 ) {
-        printf("copying %s to %s\n",srcFilenameRemote, srcFilenameLocal);
+//[of]:    #if SHOW_MESSAGES_READ_AND_SKIPS == 1
+    #if SHOW_MESSAGES_READ_AND_SKIPS == 1
+      sprintf(gl_debugMessageCurrent, "reading ----------- %s", fileNameLocal);
+      if (strcmp(gl_debugMessageCurrent, gl_debugMessageLast) != 0) {
+        printft("%s\n", gl_debugMessageCurrent);
+        strcpy(gl_debugMessageLast,gl_debugMessageCurrent);
+      }
+    #endif
+//[cf]
 
-        strcpy(srcFilenameLocal, options.local_store);
+//[of]:    if local file does not exist, try to get remote
+    if( access( fileNameLocal, F_OK ) == -1 ) {
+//[c]      printf("local file %s not found\n",fileNameLocal);
+      // local file not exists
 
-        strcat(srcFilenameLocal, driveIndexText);
-        blockfs_checkdir(srcFilenameLocal);
-        strcat(srcFilenameLocal, "/");
+      strcpy(fileNameRemote, options.remote_store);
+      strcat(fileNameRemote, driveIndexText);
+      strcat(fileNameRemote, "/");
+      strcat(fileNameRemote, filePathSuffix);
+      strcat(fileNameRemote, "/");
+      strcat(fileNameRemote, fileName);
 
-        strcat(srcFilenameLocal, dirLevel1);
-        blockfs_checkdir(srcFilenameLocal);
-        strcat(srcFilenameLocal, "/");
+      if( access( fileNameRemote, F_OK ) != -1 ) {
+        printft("r copying %s to %s\n",fileNameRemote, fileNameLocal);
 
-        strcat(srcFilenameLocal, dirLevel2);
-        blockfs_checkdir(srcFilenameLocal);
-        strcat(srcFilenameLocal, "/");
+        //mkdir path if it doesn't exist
+        _mkdir(filePathLocal);
 
-        strcat(srcFilenameLocal, dirLevel3);
-        blockfs_checkdir(srcFilenameLocal);
-        strcat(srcFilenameLocal, "/");
-
-        strcat(srcFilenameLocal, dirLevel4);
-        strcat(srcFilenameLocal, ".dat");
-
-        res = cp(srcFilenameRemote, srcFilenameLocal);
-      	if (res != 0) {
-      		res = -errno;
+        res = cp(fileNameRemote, fileNameLocal);
+        if (res != 0) {
+          res = -errno;
           return res;
         }
-        printf("copying complete\n");
+        printft("r copying complete\n");
 //[c]      } else {
-//[c]        printf("remote file %s not found\n",srcFilenameRemote);
+//[c]        printf("remote file %s not found\n",fileNameRemote);
       }
     }
-
-    if( access( srcFilenameLocal, F_OK ) != -1 ) {
+//[cf]
+//[of]:    if local file exist, read it
+    if( access( fileNameLocal, F_OK ) != -1 ) {
       // file exists
-      
-      file_ptr = fopen(srcFilenameLocal,"rb");  // r open for reading, b for binary
+
+      file_ptr = fopen(fileNameLocal,"rb");  // r open for reading, b for binary
 
       //get size of file
       fseek(file_ptr, 0L, SEEK_END);
@@ -360,6 +389,8 @@ static int blockfs_readblocks(char *buf, size_t size, off_t offset)
 static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
 {
 //[of]:  setup vars
+  int res;
+
   long int chunkSize = (long int) 1024 * 1024 * atoi(options.chunk_size);
   long int chunkOffset;
   unsigned int chunkId;
@@ -369,13 +400,19 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
 	size_t bufferRemaining = size;
 	size_t writeLength;
 
+
+
   char chunkIdText[12];
   char driveIndexText[4];
   char dirLevel1[3];
   char dirLevel2[3];
   char dirLevel3[3];
   char dirLevel4[3];
-  char dstFilename[100];
+  char filePathSuffix[9];
+  char fileName[7];
+  char filePathLocal[256];
+  char fileNameLocal[256];
+  char fileNameRemote[256];
 
   FILE *file_ptr = NULL;
 //[cf]
@@ -385,7 +422,7 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
   	chunkOffset = (offset + bufferOffset) % chunkSize;
   	driveIndex = chunkId % atoi(options.mount_splits) + 1;
   	
-//[of]:    encode chunk filename and create dirs as needed.
+//[of]:    encode chunk filename
     sprintf(chunkIdText, "%08d", chunkId);
     sprintf(driveIndexText, "%01ld", driveIndex);
 
@@ -398,37 +435,70 @@ static int blockfs_writeblocks(const char *buf, size_t size, off_t offset)
     memcpy( dirLevel4, &chunkIdText[6], 2 );
     dirLevel4[2] = '\0';
 
-    strcpy(dstFilename, options.local_store);
+    strcpy(fileName, dirLevel4);
+    strcat(fileName, ".dat");
 
-    strcat(dstFilename, driveIndexText);
-    blockfs_checkdir(dstFilename);
-    strcat(dstFilename, "/");
+    strcpy(filePathSuffix, dirLevel1);
+    strcat(filePathSuffix, "/");
+    strcat(filePathSuffix, dirLevel2);
+    strcat(filePathSuffix, "/");
+    strcat(filePathSuffix, dirLevel3);
 
-    strcat(dstFilename, dirLevel1);
-    blockfs_checkdir(dstFilename);
-    strcat(dstFilename, "/");
+    strcpy(fileNameLocal, options.local_store);
+    strcat(fileNameLocal, driveIndexText);
+    strcat(fileNameLocal, "/");
+    strcat(fileNameLocal, filePathSuffix);
+    strcpy(filePathLocal, fileNameLocal);
+    strcat(fileNameLocal, "/");
+    strcat(fileNameLocal, fileName);
+//[cf]
 
-    strcat(dstFilename, dirLevel2);
-    blockfs_checkdir(dstFilename);
-    strcat(dstFilename, "/");
+//[of]:    if local file does not exist, try to get remote or create
+    if( access( fileNameLocal, F_OK ) == -1 ) {
+      // local file not exists
 
-    strcat(dstFilename, dirLevel3);
-    blockfs_checkdir(dstFilename);
-    strcat(dstFilename, "/");
+      //mkdir path if it doesn't exist
+      _mkdir(filePathLocal);
 
-    strcat(dstFilename, dirLevel4);
-    strcat(dstFilename, ".dat");
+      strcpy(fileNameRemote, options.remote_store);
+      strcat(fileNameRemote, driveIndexText);
+      strcat(fileNameRemote, "/");
+      strcat(fileNameRemote, filePathSuffix);
+      strcat(fileNameRemote, "/");
+      strcat(fileNameRemote, fileName);
 
-    //create flie if it doesn't exist
-    if( access( dstFilename, F_OK ) == -1 ) {
-      file_ptr = fopen(dstFilename,"w");
-      fclose(file_ptr);
+      if( access( fileNameRemote, F_OK ) != -1 ) {
+        printft("w copying %s to %s\n",fileNameRemote, fileNameLocal);
+
+        res = cp(fileNameRemote, fileNameLocal);
+        if (res != 0) {
+          res = -errno;
+          return res;
+        }
+        printft("w copying complete\n");
+      } else {
+        //create flie if it doesn't exist
+        printft("w creating %s\n", fileNameLocal);
+
+        file_ptr = fopen(fileNameLocal,"w");
+        fclose(file_ptr);
+      }
     }
 //[cf]
 
 		writeLength = MIN(chunkSize - chunkOffset, bufferRemaining);
 
-    file_ptr = fopen(dstFilename,"r+b");  // r+ open for update and writing, b for binary
+//[of]:    #if SHOW_MESSAGES_WRITES == 1
+    #if SHOW_MESSAGES_WRITES == 1
+      sprintf(gl_debugMessageCurrent, "writing ----------- %s", fileNameLocal);
+      if (strcmp(gl_debugMessageCurrent, gl_debugMessageLast) != 0) {
+        printft("%s\n", gl_debugMessageCurrent);
+        strcpy(gl_debugMessageLast,gl_debugMessageCurrent);
+      }
+    #endif
+//[cf]
+
+    file_ptr = fopen(fileNameLocal,"r+b");  // r+ open for update and writing, b for binary
     fseek(file_ptr, chunkOffset, SEEK_SET);
     fwrite(buf + bufferOffset, writeLength, 1, file_ptr); // write bytes from buffer
     fclose(file_ptr);
@@ -585,7 +655,7 @@ int main(int argc, char *argv[])
   // enable single thread operation cuz this doesn't work with multi-threaded
   fuse_opt_add_arg(&args, "-s");
 
-  	printf("and we're off!\n");
+  printf("and we're off!\n");
 
 	/* When --help is specified, first print our own file-system
 	   specific help text, then signal fuse_main to show
