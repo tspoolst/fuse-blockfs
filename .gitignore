@@ -4,3 +4,4 @@ s/*
 t/*
 blockfs
 blockfs-nocopy
+blockfs-nocopy.1.gz
