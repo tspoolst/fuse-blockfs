@@ -38,7 +38,7 @@ function pause {
   }
   lc_message="${1:-press any key to continue}"
   
-  echo -en "\e[?1000h\e[?1006h\e[?1015h"
+  echo -en "\e[?1000;1006;1015h"
 
   if ${gl_pause:-true} ; then
     if [[ -z "${lc_timeout}" ]] ; then
@@ -61,7 +61,7 @@ function pause {
       done
     fi
   fi
-  echo -en "\e[?1000l\e[?1006l\e[?1015l"
+  echo -en "\e[?1000;1006;1015l"
   return ${lc_errorlevel}
 }
 #[of]:function pauseHandleKey {
@@ -124,7 +124,7 @@ function pauseHandleKey {
 #[of]:function askyn {
 function askyn {
   typeset _key _return _mouse _mouseEvent
-  echo -en "\e[?1000h\e[?1006h\e[?1015h"
+  echo -en "\e[?1000;1006;1015h"
   echo -n "${1:-continue}? [y/n] "
   while true ; do
     read -s -n 1 -r _key
@@ -164,7 +164,7 @@ function askyn {
     esac
   done
   echo
-  echo -en "\e[?1000l\e[?1006l\e[?1015l"
+  echo -en "\e[?1000;1006;1015l"
   return ${_return}
 }
 #[cf]
@@ -340,9 +340,9 @@ function fn_createSplitdirs {
     for ((i=0;i<gl_${1}totalMounts;i++)) ; do
       eval "aset lc_cmount \${gl_${1}mounts${i}[@]:0:2} \$(printf '%.$((${#gl_precision}-1))f' \${gl_${1}mounts${i}[2]})"
       for ((j=(${lc_cmount[2]/./}*1024-gl_remoteDrivePadding*gl_precision)/gl_precision;j>0;j-=${gl_splitSize})) ; do
-        : mkdir -pv ${gl_baseMountDir}/${lc_cmount[1]}/${lc_splitnum} &
+        mkdir -pv ${gl_baseMountDir}/${lc_cmount[1]}/${lc_splitnum} &
 #[c]        { [[ ! -e ${gl_baseMountDir}/${lc_cmount[1]}/${gl_checkfile} ]] && echo "123elloh321" > ${gl_baseMountDir}/${lc_cmount[1]}/${gl_checkfile}; } &
-        echo ln -sfnTv ${gl_baseMountDir}/${lc_cmount[1]}/${lc_splitnum} ${gl_baseMountDir}/remotefs/${1}/${lc_splitnum}
+        ln -sfnTv ${gl_baseMountDir}/${lc_cmount[1]}/${lc_splitnum} ${gl_baseMountDir}/remotefs/${1}/${lc_splitnum}
         ((lc_splitnum++))
         ((lc_splitnum > gl_splitCount)) && break
       done

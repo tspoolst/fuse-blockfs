@@ -28,10 +28,9 @@
  *
  * Compile with:
  *
- *     gcc -Wall blockfs.c `pkg-config fuse3 --cflags --libs` -o blockfs
+ *     gcc -Wall blockfs-nocopy.c `pkg-config fuse3 --cflags --libs` -o blockfs-nocopy
+ *     strip blockfs-nocopy
  *
- * ## Source code ##
- * \include blockfs.c
  */
 //[cf]
 //[of]:includes/defines

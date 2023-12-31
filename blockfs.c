@@ -29,9 +29,7 @@
  * Compile with:
  *
  *     gcc -Wall blockfs.c `pkg-config fuse3 --cflags --libs` -o blockfs
- *
- * ## Source code ##
- * \include blockfs.c
+ *     strip blockfs
  */
 //[cf]
 //[of]:includes/defines
@@ -66,6 +64,8 @@
 #include <sys/param.h>
 
 #include <sys/time.h>
+#include <time.h>
+#include <utime.h>
 
 #include <stdarg.h>
 //[cf]
@@ -174,6 +174,11 @@ int cp(const char *from, const char *to)
     FILE *stream_R;
     FILE *stream_W; 
 
+    struct stat     myFileStat;
+    struct utimbuf  myTimeBuf;
+    int e;
+
+
     stream_R = fopen (from, "rb");
     if (stream_R == NULL)
         return -1;
@@ -203,6 +208,13 @@ int cp(const char *from, const char *to)
 
     fclose (stream_R);
     fclose (stream_W);
+
+    e = stat(from, &myFileStat);
+    if (e != 0) exit (4);
+    myTimeBuf.actime  = myFileStat.st_atime;
+    myTimeBuf.modtime = myFileStat.st_mtime;
+    e = utime(to, &myTimeBuf);
+    if (e != 0) exit (5);
 
     return 0;
 }
